@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+#
+# build-cachyos-frl.sh
+# --------------------
+# Builds a CachyOS kernel (zen4 tuning) with mkopec's AMDGPU HDMI 2.1 FRL
+# patches applied on top. Mirrors the official CachyOS script-znver4.sh build
+# configuration as closely as possible.
+#
+# Usage:
+#   ./build-cachyos-frl.sh <path-to-frl-patch-or-zip>
+#   ./build-cachyos-frl.sh ~/Downloads/Patch.zip
+#   ./build-cachyos-frl.sh ~/Downloads/0001-amdgpu-frl.patch
+#
+# The patch file comes from mkopec's GitHub Actions artifacts:
+#   https://github.com/mkopec/linux/actions
+#   → latest "Generate patch" run → download "Patch" artifact
+#
+# Prerequisites (install once):
+#   sudo pacman -S --needed base-devel bc cpio gettext libelf pahole perl \
+#     python rust rust-bindgen rust-src tar xz zstd clang llvm lld git
+#
+# Place filter-patch.py next to this script (or in PATH).
+
+set -euo pipefail
+
+###############################################################################
+# Configuration — tweak these or export before running
+###############################################################################
+
+CACHYOS_REPO="https://github.com/CachyOS/linux-cachyos.git"
+CACHYOS_BRANCH="master"
+
+# "linux-cachyos"       → default (EEVDF + BORE, Clang ThinLTO)
+# "linux-cachyos-bore"  → BORE scheduler, GCC, no LTO
+CACHYOS_VARIANT="${CACHYOS_VARIANT:-linux-cachyos}"
+
+# Resolve path to filter-patch.py (same directory as this script)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FILTER_SCRIPT="${SCRIPT_DIR}/filter-patch.py"
+
+BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/build}"
+
+# Space-separated VAR=VALUE pairs for extra PKGBUILD tweaks
+# e.g. "_HZ_ticks=750 _preempt=lazy _hugepage=madvise"
+PKGBUILD_OVERRIDES="${PKGBUILD_OVERRIDES:-}"
+
+# Package name suffix (produces linux-cachyos-frl)
+FRL_SUFFIX="frl"
+
+###############################################################################
+# Functions
+###############################################################################
+
+log()  { printf '\e[1;32m>>>\e[0m %s\n' "$*"; }
+warn() { printf '\e[1;33m>>>\e[0m %s\n' "$*"; }
+die()  { printf '\e[1;31m>>>\e[0m %s\n' "$*" >&2; exit 1; }
+
+fetch_cachyos() {
+    log "Fetching latest CachyOS PKGBUILD..."
+    if [[ -d "$BUILD_DIR/linux-cachyos" ]]; then
+        cd "$BUILD_DIR/linux-cachyos"
+        git fetch origin
+        git reset --hard "origin/$CACHYOS_BRANCH"
+    else
+        git clone --depth=1 -b "$CACHYOS_BRANCH" "$CACHYOS_REPO" "$BUILD_DIR/linux-cachyos"
+    fi
+}
+
+resolve_patch() {
+    local input="$1"
+
+    # Handle zip files (GitHub Actions artifact downloads)
+    if [[ "$input" == *.zip ]]; then
+        log "Extracting patch from zip..."
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        unzip -o "$input" -d "$tmpdir" >/dev/null
+        local found
+        found=$(find "$tmpdir" -name '*.patch' -print -quit)
+        [[ -n "$found" ]] || die "No .patch file found inside $input"
+        input="$found"
+    fi
+
+    [[ -f "$input" ]] || die "Patch file not found: $input"
+
+    # Filter out non-kernel hunks (.github/, .gitignore)
+    log "Filtering patch to kernel-only changes..."
+    [[ -f "$FILTER_SCRIPT" ]] || die "Missing filter-patch.py — expected at: $FILTER_SCRIPT"
+    python3 "$FILTER_SCRIPT" "$input" "$BUILD_DIR/0001-amdgpu-frl.patch"
+
+    local total
+    total=$(grep -c '^diff --git' "$BUILD_DIR/0001-amdgpu-frl.patch" || echo 0)
+    log "Patch ready: $total files modified"
+}
+
+prepare_build_dir() {
+    log "Preparing build directory..."
+    local workdir="$BUILD_DIR/pkg"
+
+    rm -rf "$workdir"
+    mkdir -p "$workdir"
+
+    cp "$BUILD_DIR/linux-cachyos/$CACHYOS_VARIANT/PKGBUILD" "$workdir/PKGBUILD"
+    cp "$BUILD_DIR/linux-cachyos/$CACHYOS_VARIANT/config" "$workdir/config"
+    cp "$BUILD_DIR/0001-amdgpu-frl.patch" "$workdir/0001-amdgpu-frl.patch"
+
+    # Fixup patches for FRL changes that the main patch can't apply cleanly
+    # because CachyOS context differs (VRR/ALLM patchset already applied nearby).
+    # patch --forward skips entire files when the first hunk is reversed, so
+    # files with a mix of reversed+FRL hunks are handled here instead.
+    # 0002: drm_edid.c         — rename drm_get_max_frl_rate → drm_parse_max_frl_rate,
+    #                            update DSC and hdmi call sites to use frl_cap
+    # 0003: dc_types.h         — adds frl_caps and dsc_caps structs to dc_edid_caps
+    # 0004: link/Makefile      — adds link_hwss_hpo_frl.o and link_frl_training.o
+    # 0005: drm_connector.h    — adds struct drm_hdmi_frl_cap, updates drm_hdmi_dsc_cap
+    #                            and drm_hdmi_info to use frl_cap instead of raw fields
+    # 0006: amdgpu_dm_helpers  — FRL/DSC population in populate_hdmi_info_from_connector
+    # 0007: amdgpu_dm.c        — SIGNAL_TYPE_HDMI_FRL cases + FRL-aware YCbCr420 check
+    # 0008: intel_dp.c         — update frl_cap field refs (max_lanes/max_frl_rate_per_lane → frl_cap.*)
+    cp "$SCRIPT_DIR/0002-amdgpu-frl-edid-fixup.patch" "$workdir/0002-amdgpu-frl-edid-fixup.patch"
+    cp "$SCRIPT_DIR/0003-amdgpu-frl-dc-types-fixup.patch" "$workdir/0003-amdgpu-frl-dc-types-fixup.patch"
+    cp "$SCRIPT_DIR/0004-amdgpu-frl-link-makefile-fixup.patch" "$workdir/0004-amdgpu-frl-link-makefile-fixup.patch"
+    cp "$SCRIPT_DIR/0005-amdgpu-frl-connector-header-fixup.patch" "$workdir/0005-amdgpu-frl-connector-header-fixup.patch"
+    cp "$SCRIPT_DIR/0006-amdgpu-frl-dm-helpers-fixup.patch" "$workdir/0006-amdgpu-frl-dm-helpers-fixup.patch"
+    cp "$SCRIPT_DIR/0007-amdgpu-frl-amdgpu-dm-fixup.patch" "$workdir/0007-amdgpu-frl-amdgpu-dm-fixup.patch"
+    cp "$SCRIPT_DIR/0008-amdgpu-frl-intel-dp-fixup.patch" "$workdir/0008-amdgpu-frl-intel-dp-fixup.patch"
+
+    cd "$workdir"
+
+    # -----------------------------------------------------------
+    # Match the official script-znver4.sh configuration:
+    #   _processor_opt  → zen4   (enables CONFIG_MZEN4)
+    #   _use_auto_optimization → no
+    # LTO left at default (thin) — znver4 repo ships ThinLTO.
+    # -----------------------------------------------------------
+    sed -i 's/_processor_opt:=}/_processor_opt:=zen4}/' PKGBUILD
+    sed -i 's/_use_auto_optimization:=yes/_use_auto_optimization:=no/' PKGBUILD
+
+    # Inject FRL patches into source array
+    # Order matters: main FRL patch first, then fixups
+    sed -i 's|"config")|"config"\n    "0001-amdgpu-frl.patch"\n    "0002-amdgpu-frl-edid-fixup.patch"\n    "0003-amdgpu-frl-dc-types-fixup.patch"\n    "0004-amdgpu-frl-link-makefile-fixup.patch"\n    "0005-amdgpu-frl-connector-header-fixup.patch"\n    "0006-amdgpu-frl-dm-helpers-fixup.patch"\n    "0007-amdgpu-frl-amdgpu-dm-fixup.patch"\n    "0008-amdgpu-frl-intel-dp-fixup.patch")|' PKGBUILD
+
+    # The FRL patch may contain hunks already applied by CachyOS (e.g. drm_dp_helper.c).
+    # Wrap the non-nvidia patch command so our FRL patch uses --forward to skip
+    # already-applied hunks, while CachyOS patches still use strict mode.
+    sed -i '/^            patch -Np1 < "\.\.\/\$src"$/c\
+            if [[ "$src" == *amdgpu-frl* ]]; then\
+                patch -Np1 --forward < "../$src" || true\
+            else\
+                patch -Np1 < "../$src"\
+            fi' PKGBUILD
+
+    # Rename package so it doesn't conflict with stock CachyOS kernel
+    sed -i "s/_pkgsuffix=cachyos-lto/_pkgsuffix=cachyos-${FRL_SUFFIX}-lto/" PKGBUILD
+    sed -i "s/_pkgsuffix=cachyos-gcc/_pkgsuffix=cachyos-${FRL_SUFFIX}-gcc/" PKGBUILD
+    sed -i "s/_pkgsuffix=cachyos$/_pkgsuffix=cachyos-${FRL_SUFFIX}/" PKGBUILD
+
+    # Apply any user overrides
+    if [[ -n "$PKGBUILD_OVERRIDES" ]]; then
+        for override in $PKGBUILD_OVERRIDES; do
+            local var="${override%%=*}"
+            local val="${override#*=}"
+            log "Override: $var = $val"
+            sed -i "s|${var}:=[^}]*|${var}:=${val}|" PKGBUILD
+        done
+    fi
+
+    sed -i "/^b2sums=/,/)$/ s|')\$|'\n        'SKIP'\n        'SKIP'\n        'SKIP'\n        'SKIP'\n        'SKIP'\n        'SKIP'\n        'SKIP'\n        'SKIP')|" PKGBUILD
+
+    log "PKGBUILD prepared. Key settings:"
+    grep -E '^\s*:\s*"\$\{_(cpusched|processor_opt|use_llvm_lto|HZ_ticks|preempt|hugepage)' PKGBUILD | sed 's/^[[:space:]]*/  /'
+}
+
+do_build() {
+    cd "$BUILD_DIR/pkg"
+
+    log "Downloading kernel sources..."
+    makepkg --nobuild --nodeps --skippgpcheck --skipchecksums
+
+    log "Starting kernel build (this will take a while)..."
+    log "Building with $(nproc) threads"
+    time makepkg --noextract --skippgpcheck --skipchecksums 2>&1 | tee "$BUILD_DIR/build.log" | tail -50
+
+    log "Build complete! Packages:"
+    ls -1 "$BUILD_DIR/pkg/"*.pkg.tar.zst 2>/dev/null || warn "No packages found"
+}
+
+print_done() {
+    echo ""
+    log "============================================"
+    log "  Build finished!"
+    log "============================================"
+    echo ""
+    echo "  Install with:"
+    echo "    sudo pacman -U $BUILD_DIR/pkg/linux-cachyos-${FRL_SUFFIX}*.pkg.tar.zst"
+    echo ""
+    echo "  Then reboot and select the new kernel."
+    echo "  To revert, boot your previous kernel from the bootloader."
+    echo ""
+    echo "  To rebuild after updates, download a fresh Patch.zip from:"
+    echo "    https://github.com/mkopec/linux/actions"
+    echo "  Then re-run:"
+    echo "    ./build-cachyos-frl.sh Patch.zip"
+    echo ""
+}
+
+###############################################################################
+# Main
+###############################################################################
+
+[[ -n "${1:-}" ]] || die "Usage: $0 <path-to-patch-or-zip>
+
+Download the patch artifact from:
+  https://github.com/mkopec/linux/actions
+  → latest 'Generate patch' run → download 'Patch' artifact
+
+Then run:
+  $0 ~/Downloads/Patch.zip
+  $0 ~/Downloads/0001-amdgpu-frl.patch"
+
+mkdir -p "$BUILD_DIR"
+
+fetch_cachyos
+resolve_patch "$1"
+prepare_build_dir
+do_build
+print_done

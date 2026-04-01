@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CACHYOS_REPO="https://github.com/CachyOS/linux-cachyos.git"
+CACHYOS_BRANCH="master"
+CACHYOS_VARIANT="${CACHYOS_VARIANT:-linux-cachyos}"
+BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/build}"
+KERNEL_REF="${KERNEL_REF:-$SCRIPT_DIR/ref}"
+
+log()  { printf '\e[1;32m>>>\e[0m %s\n' "$*"; }
+warn() { printf '\e[1;33m>>>\e[0m %s\n' "$*"; }
+die()  { printf '\e[1;31m>>>\e[0m %s\n' "$*" >&2; exit 1; }
+
+fetch_cachyos() {
+    log "Fetching latest CachyOS PKGBUILD..."
+    if [[ -d "$BUILD_DIR/linux-cachyos" ]]; then
+        cd "$BUILD_DIR/linux-cachyos"
+        git fetch origin
+        git reset --hard "origin/$CACHYOS_BRANCH"
+    else
+        git clone --depth=1 -b "$CACHYOS_BRANCH" "$CACHYOS_REPO" "$BUILD_DIR/linux-cachyos"
+    fi
+}
+
+prepare_clean_build() {
+    log "Preparing clean build directory..."
+    local workdir="$BUILD_DIR/ref-pkg"
+
+    rm -rf "$workdir"
+    mkdir -p "$workdir"
+
+    cp "$BUILD_DIR/linux-cachyos/$CACHYOS_VARIANT/PKGBUILD" "$workdir/PKGBUILD"
+    cp "$BUILD_DIR/linux-cachyos/$CACHYOS_VARIANT/config" "$workdir/config"
+
+    cd "$workdir"
+
+    sed -i 's/_processor_opt:=}/_processor_opt:=zen4}/' PKGBUILD
+    sed -i 's/_use_auto_optimization:=yes/_use_auto_optimization:=no/' PKGBUILD
+}
+
+extract_clean_source() {
+    log "Extracting clean CachyOS kernel source (no FRL patches)..."
+    cd "$BUILD_DIR/ref-pkg"
+    makepkg --nobuild --nodeps --skippgpcheck --skipchecksums
+}
+
+sync_kernel_ref() {
+    log "Syncing clean source to $KERNEL_REF/cachyos-source-clean ..."
+    local src
+    src=$(find "$BUILD_DIR/ref-pkg/src" -maxdepth 1 -type d -name 'cachyos-*' | head -1)
+    [[ -n "$src" ]] || die "Could not find extracted kernel source in $BUILD_DIR/ref-pkg/src"
+
+    mkdir -p "$KERNEL_REF/cachyos-source-clean"
+    rsync -a --delete "$src/" "$KERNEL_REF/cachyos-source-clean/"
+    log "Clean source synced: $(basename "$src")"
+}
+
+update_mkopec_patch() {
+    local input="$1"
+
+    if [[ "$input" == *.zip ]]; then
+        log "Extracting patch from zip..."
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        unzip -o "$input" -d "$tmpdir" >/dev/null
+        local found
+        found=$(find "$tmpdir" -name '*.patch' -print -quit)
+        [[ -n "$found" ]] || die "No .patch file found inside $input"
+        input="$found"
+    fi
+
+    [[ -f "$input" ]] || die "Patch file not found: $input"
+
+    mkdir -p "$KERNEL_REF/mkopec-patch"
+    cp "$input" "$KERNEL_REF/mkopec-patch/0001-amdgpu-frl.patch"
+    local total
+    total=$(grep -c '^diff --git' "$KERNEL_REF/mkopec-patch/0001-amdgpu-frl.patch" || echo 0)
+    log "mkopec patch updated: $total files"
+}
+
+print_done() {
+    echo ""
+    log "============================================"
+    log "  kernel-ref updated!"
+    log "============================================"
+    echo ""
+    echo "  Clean source: $KERNEL_REF/cachyos-source-clean"
+    echo ""
+    echo "  Use for conflict checking:"
+    echo "    cd $KERNEL_REF/cachyos-source-clean"
+    echo "    patch -p1 --dry-run --forward < $KERNEL_REF/mkopec-patch/0001-amdgpu-frl.patch 2>&1 | grep -E 'FAILED|Reversed'"
+    echo ""
+}
+
+mkdir -p "$BUILD_DIR"
+
+fetch_cachyos
+prepare_clean_build
+extract_clean_source
+sync_kernel_ref
+
+if [[ -n "${1:-}" ]]; then
+    update_mkopec_patch "$1"
+fi
+
+print_done
