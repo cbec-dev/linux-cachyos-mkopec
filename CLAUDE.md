@@ -16,13 +16,9 @@ Enables 4K/120Hz over HDMI 2.1 on AMD GPUs (RX 9070 XT / RDNA 4 / DCN 4.0.1).
 | `update-kernel-ref` | Refreshes ref/cachyos-source-clean |
 | `filter-patch.py` | Strips SKIP_PATHS files from mkopec's raw patch |
 | `audit-frl-patches.py` | Line-by-line verification of fixup patches vs patched tree |
-| `0002-amdgpu-frl-edid-fixup.patch` | drm_edid.c: rename fn + update call sites |
-| `0003-amdgpu-frl-dc-types-fixup.patch` | dc_types.h: struct defs + field injection |
-| `0004-amdgpu-frl-link-makefile-fixup.patch` | link/Makefile: add FRL .o files |
-| `0005-amdgpu-frl-connector-header-fixup.patch` | drm_connector.h: struct drm_hdmi_frl_cap + frl_cap fields |
-| `0006-amdgpu-frl-dm-helpers-fixup.patch` | amdgpu_dm_helpers.c: FRL/DSC population |
-| `0007-amdgpu-frl-amdgpu-dm-fixup.patch` | amdgpu_dm.c: SIGNAL_TYPE_HDMI_FRL cases |
-| `0008-amdgpu-frl-intel-dp-fixup.patch` | intel_dp.c: update frl_cap field references |
+
+**Patch files (0002–0008) are NOT distributed.** They must be regenerated from
+the mkopec patch + CachyOS clean source using the procedure below.
 
 ---
 
@@ -91,13 +87,13 @@ produces expected `.rej`, harmless).
 ```
 CachyOS kernel tarball (includes CachyOS's own patches baked in)
   ↓  0001-amdgpu-frl.patch       (~94 files, --forward || true)
-  ↓  0002 drm_edid.c             (rename drm_get_max_frl_rate → drm_parse_max_frl_rate)
-  ↓  0003 dc_types.h             (struct dc_hdmi_frl_caps + dc_hdmi_dsc_caps + fields)
+  ↓  0002 drm_edid.c             (rename fn + struct param + update 2 call sites)
+  ↓  0003 dc_types.h             (2 new structs + 2 new fields in dc_edid_caps)
   ↓  0004 link/Makefile          (link_hwss_hpo_frl.o + link_frl_training.o)
-  ↓  0005 drm_connector.h        (struct drm_hdmi_frl_cap, frl_cap in dsc_cap + hdmi_info)
-  ↓  0006 amdgpu_dm_helpers.c    (FRL + DSC population in populate_hdmi_info_from_connector)
-  ↓  0007 amdgpu_dm.c            (SIGNAL_TYPE_HDMI_FRL in 3 switch/if locations)
-  ↓  0008 intel_dp.c             (frl_cap.max_lanes, frl_cap.max_rate_per_lane refs)
+  ↓  0005 drm_connector.h        (new struct + replace fields in 2 existing structs)
+  ↓  0006 amdgpu_dm_helpers.c    (FRL + DSC population body)
+  ↓  0007 amdgpu_dm.c            (4 hunks: FRL signal type + YCbCr420 guard + dc_is_hdmi_signal + connector type)
+  ↓  0008 intel_dp.c             (4 field refs: hdmi.X → hdmi.frl_cap.X, dsc_cap.X → dsc_cap.frl_cap.X)
 ```
 
 ### SKIP_PATHS in filter-patch.py
@@ -134,6 +130,204 @@ NOT skipped — applies via --forward with 1 expected .rej:
 | Tick rate | 1000 Hz |
 | Preempt | full (low-latency) |
 | Hugepages | always |
+
+---
+
+## Generating fixup patches (0002–0008)
+
+The patch files are not checked in — they must be regenerated from the mkopec
+patch and the CachyOS clean source. This section is the authoritative reference
+for what each patch must contain. **Always use mkopec's patch as the source of
+truth**, not this document alone — the patch may evolve between kernel versions.
+
+### Prerequisites
+
+```bash
+update-kernel-ref ~/Downloads/Patch.zip   # populates ref/cachyos-source-clean + ref/mkopec-patch
+```
+
+### Method for each patch
+
+1. Extract mkopec's hunks for the target file:
+   `filterdiff -i "a/path/to/file" ref/mkopec-patch/0001-amdgpu-frl.patch`
+2. Read the CachyOS clean source file to see current state.
+3. Identify which changes mkopec wants that CachyOS doesn't already have.
+   - VRR/ALLM changes (vrr_cap, allm, fapa_start_location, gaming_info, etc.)
+     are **already in CachyOS** — do NOT duplicate them.
+   - FRL-specific changes (frl_cap structs, SIGNAL_TYPE_HDMI_FRL, FRL training
+     objects, dc_is_hdmi_signal, etc.) are **missing** — these go in fixups.
+4. Copy the clean source file, apply changes, generate diff:
+   ```bash
+   cp ref/cachyos-source-clean/path/to/file /tmp/file.orig
+   cp /tmp/file.orig /tmp/file
+   # edit /tmp/file to apply FRL changes
+   diff -u /tmp/file.orig /tmp/file \
+       | sed 's|/tmp/file.orig|a/path/to/file|;s|/tmp/file|b/path/to/file|' \
+       > 00XX-fixup.patch
+   ```
+5. **Strip timestamps** from `---`/`+++` lines (audit-frl-patches.py parses
+   `+++ b/path` and timestamps break path extraction):
+   ```bash
+   sed -i 's|\t[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9:.]* [-+][0-9]\{4\}$||' 00XX-fixup.patch
+   ```
+6. Dry-run: `patch -p1 --dry-run -d ref/cachyos-source-clean < 00XX-fixup.patch`
+
+### What each fixup must contain
+
+**0002 — `drivers/gpu/drm/drm_edid.c`**
+
+Rename function and update its signature + all call sites:
+- `drm_get_max_frl_rate(int max_frl_rate, u8 *max_lanes, u8 *max_rate_per_lane)`
+  → `drm_parse_max_frl_rate(int max_frl_rate, struct drm_hdmi_frl_cap *frl)`
+- Function body: replace `*max_lanes`/`*max_rate_per_lane` with local vars,
+  then assign `frl->max_lanes`, `frl->max_rate`, `frl->max_rate_per_lane` at end.
+- Call site in `drm_parse_dsc_info`: `drm_parse_max_frl_rate(dsc_max_frl_rate, &hdmi_dsc->frl_cap)`
+- Call site in `drm_parse_hdmi_forum_scds`: `drm_parse_max_frl_rate(max_frl_rate, &hdmi->frl_cap)`
+
+Do NOT include: `drm_parse_hdmi_gaming_info`, VRR debug prints, ALLM fields — CachyOS has these.
+
+**0003 — `drivers/gpu/drm/amd/display/dc/dc_types.h`**
+
+Add two new struct definitions BEFORE `struct dc_edid_caps`:
+- `struct dc_hdmi_frl_caps { max_rate, max_rate_per_lane, max_lanes }` (uint8_t fields)
+- `struct dc_hdmi_dsc_caps { v1p2, all_bpp, native_420, max_bpc, total_chunk_kbytes,
+  max_slices, max_clk, struct dc_hdmi_frl_caps frl }`
+
+Add two fields to `struct dc_edid_caps` under the `/* HDMI 2.1 caps */` comment,
+BEFORE the existing `bool allm`:
+- `struct dc_hdmi_frl_caps frl_caps;`
+- `struct dc_hdmi_dsc_caps dsc_caps;`
+
+Do NOT add: `allm`, `fva`, `hdmi_vrr` bools — CachyOS already has them.
+
+**0004 — `drivers/gpu/drm/amd/display/dc/link/Makefile`**
+
+Add two object files:
+- `link_hwss_hpo_frl.o` to the `LINK_HWSS` variable (hwss section)
+- `link_frl_training.o` to the `LINK_PROTOCOLS` variable (protocols section)
+
+Note: CachyOS may not have `link_hwss_virtual.o` or `link_dp_panel_replay.o`
+that mkopec's base has — check actual Makefile content, don't blindly copy
+mkopec's hunks.
+
+**0005 — `include/drm/drm_connector.h`**
+
+Add new struct `drm_hdmi_frl_cap { max_rate, max_rate_per_lane, max_lanes }`
+(u8 fields). **Place it BEFORE `struct drm_hdmi_vrr_cap`** (after `struct drm_scdc`),
+matching mkopec's ordering.
+
+Replace fields in `struct drm_hdmi_dsc_cap`:
+- Remove `u8 max_lanes` and `u8 max_frl_rate_per_lane`
+- Add `struct drm_hdmi_frl_cap frl_cap`
+
+Replace fields in `struct drm_hdmi_info`:
+- Remove `u8 max_frl_rate_per_lane` and `u8 max_lanes`
+- Add `struct drm_hdmi_frl_cap frl_cap`
+
+Do NOT add: `fapa_start_location`, `allm`, `vrr_cap`, `drm_allm_mode` enum,
+allm/passive_vrr properties — CachyOS already has all of these.
+
+**0006 — `drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c`**
+
+Expand `populate_hdmi_info_from_connector()` body. CachyOS has only
+`edid_caps->scdc_present = hdmi->scdc.supported;` — add FRL + DSC population:
+- Declare `struct dc_hdmi_dsc_caps *dsc = &edid_caps->dsc_caps;`
+- FRL block: copy `hdmi->frl_cap.{max_rate, max_lanes, max_rate_per_lane}`
+  into `edid_caps->frl_caps.*` (early return if `max_rate == 0`)
+- DSC block: copy `hdmi->dsc_cap.{v_1p2, all_bpp, native_420, bpc_supported,
+  max_slices, total_chunk_kbytes}` into `dsc->*`, plus `hdmi->dsc_cap.frl_cap.*`
+  into `dsc->frl.*` (early return if `!v_1p2`)
+
+Do NOT include: the `edid_hdmi`/`allm`/`fva`/`hdmi_vrr` population in
+`dm_helpers_parse_edid_caps` — CachyOS already has that block. Do NOT include
+the `dm_is_freesync_pcon_whitelist` / `dm_get_adaptive_sync_support_type`
+refactoring — those are VRR changes.
+
+**0007 — `drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c`**
+
+This patch needs exactly **4 hunks**:
+
+1. **`emulated_link_detect`**: Add `case SIGNAL_TYPE_HDMI_FRL:` block (I2C
+   transaction, HDMI_FRL signal) after the existing `SIGNAL_TYPE_HDMI_TYPE_A` case.
+
+2. **`fill_stream_properties_from_drm_display_mode`** (YCbCr420 fallback):
+   Wrap the existing `timing_out->pixel_encoding = PIXEL_ENCODING_YCBCR420`
+   block with an FRL guard:
+   ```c
+   if (!stream->link->link_enc->features.flags.bits.IS_HDMI_FRL_CAPABLE ||
+       stream->sink->edid_caps.frl_caps.max_rate == 0) {
+   ```
+   Include the comment: `/* If pixel clock exceeds max HDMI TMDS clock, and
+   FRL is not possible, try to fall back to 4:2:0 encoding for TMDS */`
+
+3. **`create_stream_for_sink`** (hfvsif_infopacket): Change
+   `stream->signal == SIGNAL_TYPE_HDMI_TYPE_A` to
+   `dc_is_hdmi_signal(stream->signal)` so FRL streams also get
+   `mod_build_hf_vsif_infopacket()` called. **This is critical — without it
+   HDMI FRL streams never build their HF-VSIF infopacket.**
+
+4. **`to_drm_connector_type`**: Add `case SIGNAL_TYPE_HDMI_FRL:` fallthrough
+   to the `SIGNAL_TYPE_HDMI_TYPE_A` case returning `DRM_MODE_CONNECTOR_HDMIA`.
+
+Do NOT include: suspend/shutdown FRL disable, DC_OVERRIDE_PCON_VRR_ID_CHECK,
+allm_mode state tracking, freesync_on_desktop, ADAPTIVE_SYNC_TYPE_HDMI /
+ADAPTIVE_SYNC_TYPE_PCON_ALLOWED rewrites, HDMI CEC / allm property attachment,
+allm_changed commit_tail logic, parse_amd_vsdb refactoring, monitor_range_from_hdmi,
+or any of the large amdgpu_dm_update_freesync_caps rewrite — CachyOS carries
+all of that via its VRR/ALLM patchset.
+
+**0008 — `drivers/gpu/drm/i915/display/intel_dp.c`**
+
+In `intel_dp_hdmi_sink_max_frl()`, update 4 field references:
+- `info->hdmi.max_lanes` → `info->hdmi.frl_cap.max_lanes`
+- `info->hdmi.max_frl_rate_per_lane` → `info->hdmi.frl_cap.max_rate_per_lane`
+- `info->hdmi.dsc_cap.max_lanes` → `info->hdmi.dsc_cap.frl_cap.max_lanes`
+- `info->hdmi.dsc_cap.max_frl_rate_per_lane` → `info->hdmi.dsc_cap.frl_cap.max_rate_per_lane`
+
+### Verification
+
+After generating all patches, verify the full pipeline:
+
+```bash
+# 1. Create test tree
+rsync -a ref/cachyos-source-clean/ /tmp/frl-test-tree/
+
+# 2. Generate filtered 0001
+python3 filter-patch.py ref/mkopec-patch/0001-amdgpu-frl.patch /tmp/frl-test-tree/0001.patch
+
+# 3. Apply 0001 (expect dc_resource.c hunk #4 rejection — that's the ALLM hunk)
+cd /tmp/frl-test-tree && patch -p1 --forward < 0001.patch || true
+
+# 4. Apply fixups 0002–0008 (all must apply cleanly, no fuzz)
+for p in 0002 0003 0004 0005 0006 0007 0008; do
+    patch -p1 < /path/to/${p}-*.patch
+done
+
+# 5. Run audit (symlink test tree to expected path first)
+mkdir -p build/pkg/src && ln -sfn /tmp/frl-test-tree build/pkg/src/cachyos-X.Y.Z-N
+cp /tmp/frl-test-tree/0001.patch build/pkg/src/0001-amdgpu-frl.patch
+python3 audit-frl-patches.py   # must report ALL PASS
+```
+
+### Common mistakes
+
+- **Timestamps in patch headers**: `diff -u` adds timestamps to `---`/`+++`
+  lines. The audit script parses `+++ b/path` by stripping from char 6 — a
+  timestamp suffix makes it look for a nonexistent file. Always strip them.
+- **Including VRR/ALLM changes**: CachyOS already has `drm_hdmi_vrr_cap`,
+  `drm_parse_hdmi_gaming_info`, `allm`, `fapa_start_location`, `vrr_cap`,
+  allm properties, freesync_on_desktop, adaptive_sync refactoring, etc.
+  Including these in fixups will double-apply or conflict.
+- **Missing `dc_is_hdmi_signal` in 0007**: Without this, FRL streams skip
+  the hfvsif_infopacket build in `create_stream_for_sink`. Easy to miss
+  because it looks like a VRR/ALLM change, but it's FRL-critical.
+- **Wrong struct placement in 0005**: `struct drm_hdmi_frl_cap` must go
+  BEFORE `struct drm_hdmi_vrr_cap` (after `struct drm_scdc`), not after it.
+  mkopec's patch defines it there because `drm_hdmi_dsc_cap` (which comes
+  after `drm_hdmi_vrr_cap`) uses it as a member.
+- **Makefile context mismatch**: CachyOS's `link/Makefile` may differ from
+  mkopec's base (e.g., missing `link_hwss_virtual.o`, `link_dp_panel_replay.o`).
+  Always read the actual CachyOS Makefile instead of copying mkopec hunks verbatim.
 
 ---
 
