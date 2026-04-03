@@ -4,7 +4,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PATCH_DIR = SCRIPT_DIR
-SRC_DIR = SCRIPT_DIR / "build" / "pkg" / "src" / "cachyos-6.19.10-1"
+SRC_DIR = SCRIPT_DIR / "build" / "pkg" / "src" / "cachyos-6.19.11-2"
 
 FIXUP_PATCHES = [
     "0002-amdgpu-frl-edid-fixup.patch",

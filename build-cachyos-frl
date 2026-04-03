@@ -45,7 +45,7 @@ BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/build}"
 PKGBUILD_OVERRIDES="${PKGBUILD_OVERRIDES:-}"
 
 # Package name suffix (produces linux-cachyos-frl)
-FRL_SUFFIX="frl"
+FRL_SUFFIX="${FRL_SUFFIX:-frl}"
 
 ###############################################################################
 # Functions

@@ -50,6 +50,19 @@ sudo pacman -U build/pkg/linux-cachyos-frl*.pkg.tar.zst
 
 Download Patch.zip: https://github.com/mkopec/linux/actions → latest "Generate patch" run → "Patch" artifact.
 
+### Building a testing variant
+
+`FRL_SUFFIX` is overridable via environment variable (default: `frl`). To build
+a testing kernel that installs side-by-side with a known working `linux-cachyos-frl`:
+
+```bash
+FRL_SUFFIX=frl-testing build-cachyos-frl ~/Downloads/Patch.zip
+sudo pacman -U build/pkg/linux-cachyos-frl-testing*.pkg.tar.zst
+```
+
+Both kernels will appear in the bootloader. This is useful for validating patches
+against a new CachyOS version before replacing the production kernel.
+
 ## How to refresh the reference source (after CachyOS kernel version bump)
 
 ```bash
@@ -116,7 +129,7 @@ NOT skipped — applies via --forward with 1 expected .rej:
 1. `_processor_opt=zen4` — CONFIG_MZEN4 (matches official script-znver4.sh)
 2. `_use_auto_optimization=no` — matches official script-znver4.sh
 3. FRL patches injected into `source=()` array (0001–0008)
-4. `_pkgsuffix` renamed to `cachyos-frl` (no conflict with stock kernel)
+4. `_pkgsuffix` renamed to `cachyos-${FRL_SUFFIX}` (no conflict with stock kernel)
 5. Patch loop wrapped: `*amdgpu-frl*` uses `--forward || true`
 6. `b2sums` gets 8 `SKIP` entries (one per FRL patch file)
 
@@ -395,7 +408,19 @@ sudo dmesg | grep "HW_LINK_TRAINING"
 xrandr --verbose | grep -A5 "HDMI"
 ```
 
-Expected kernel: `6.x.y-1-cachyos-frl`
+Expected kernel: `6.x.y-1-cachyos-frl` (or `cachyos-frl-testing` for testing builds)
+
+### Version numbering note
+
+CachyOS uses `_tagrel` for the source tarball tag and `pkgrel` for the package
+version — these can differ. For example, `cachyos-6.19.11-2.tar.gz` (source
+tag `_tagrel=2`) produces package version `6.19.11-1` (`pkgrel=1`). The
+extracted source directory is named after the tag (`src/cachyos-6.19.11-2/`),
+not the package version.
+
+**`audit-frl-patches.py`** has a hardcoded `SRC_DIR` path that includes this
+directory name (e.g., `cachyos-6.19.11-2`). It must be updated when the CachyOS
+source tag changes.
 
 ## AMDGPU module parameters
 
