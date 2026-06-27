@@ -2,7 +2,7 @@
 
 Repeatable build system that applies mkopec's AMDGPU HDMI 2.1 FRL patches on top of
 CachyOS's kernel PKGBUILD to produce an installable Arch package (`linux-cachyos-frl`).
-Enables 4K/120Hz over HDMI 2.1 on AMD GPUs (RX 9070 XT / RDNA 4 / DCN 4.0.1).
+Enables 4K/120Hz over HDMI 2.1 on AMD GPUs (RX 7900 XT / RDNA 3).
 
 **Status: WORKING.** Full build produces installable packages.
 
@@ -126,8 +126,8 @@ NOT skipped — applies via --forward with 1 expected .rej:
 
 ### PKGBUILD modifications (sed in build-cachyos-frl)
 
-1. `_processor_opt=zen4` — CONFIG_MZEN4 (matches official script-znver4.sh)
-2. `_use_auto_optimization=no` — matches official script-znver4.sh
+1. `_processor_opt=raptorlake` — CONFIG_MRAPTORLAKE (Intel i5-14600KF / Raptor Lake)
+2. `_use_auto_optimization=no`
 3. FRL patches injected into `source=()` array (0001–0008)
 4. `_pkgsuffix` renamed to `cachyos-${FRL_SUFFIX}` (no conflict with stock kernel)
 5. Patch loop wrapped: `*amdgpu-frl*` uses `--forward || true`
@@ -139,7 +139,7 @@ NOT skipped — applies via --forward with 1 expected .rej:
 |---------|-------|
 | Scheduler | EEVDF + BORE (CachyOS default) |
 | LTO | Clang ThinLTO |
-| CPU tuning | zen4 (CONFIG_MZEN4) |
+| CPU tuning | raptorlake (CONFIG_MRAPTORLAKE) |
 | Tick rate | 1000 Hz |
 | Preempt | full (low-latency) |
 | Hugepages | always |
